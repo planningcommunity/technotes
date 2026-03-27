@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Community Map</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        html,
+        body,
+        #map {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+        }
+
+        .popup-form {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 0;
+            box-shadow: none;
+            background: transparent;
+            width: 250px;
+            font-family: Arial, sans-serif;
+        }
+
+        .popup-form input,
+        .popup-form textarea,
+        .popup-form select {
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 14px;
+            padding: 6px;
+        }
+
+        .popup-form textarea {
+            height: 100px;
+            resize: vertical;
+        }
+
+        .popup-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .popup-buttons button {
+            font-size: 14px;
+            padding: 8px 16px;
+        }
+
+        @media (min-width: 600px) {
+            .popup-buttons {
+                flex-direction: row;
+                justify-content: flex-start;
+            }
+
+            .popup-buttons button {
+                width: auto;
+            }
+        }
+
+        @media (max-width: 599px) {
+            .popup-buttons {
+                flex-direction: column;
+            }
+
+            .popup-buttons button {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const map = L.map("map").setView([39.629152, -79.957313], 13);
+
+        // Define map bounds (roughly around Monongalia County)
+        const bounds = L.latLngBounds(
+            [39.431109, -80.405442], // Southwest corner
+            [39.735397, -79.731156] // Northeast corner
+        );
+
+        // Apply bounds to limit panning
+        map.setMaxBounds(bounds);
+
+        // Optionally prevent users from zooming out too far
+        map.setMinZoom(10);
+
+        // Optional: snap back inside bounds if dragged out too fast
+        map.on("drag", function () {
+            map.panInsideBounds(bounds, { animate: false });
+        });
+
+        // Base map layers
+        const openStreetMap = L.tileLayer(
+            "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+            { attribution: "© OpenStreetMap contributors" }
+        );
+
+        var esriTopo = L.tileLayer(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+            {
+                attribution:
+                    "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community",
+            }
+        );
+
+        const esri = L.tileLayer(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            {
+                attribution:
+                    "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+            }
+        );
+
+        // Add default layer
+        openStreetMap.addTo(map);
+
+        // Add layer control
+        const baseMaps = {
+            "OpenStreet Map": openStreetMap,
+            "Esri Topo": esriTopo,
+            "Esri Imagery": esri,
+        };
+
+        L.control.layers(baseMaps).addTo(map);
+
+        window.markers = {};
+        let currentUserId = null;
+        let isLoggedIn = false;
+
+        function getCategoryIcon(category) {
+            let iconUrl;
+
+            switch (category) {
+                case "Walking & Biking":
+                    iconUrl =
+                        "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png";
+                    break;
+                case "Transit Access & Service":
+                    iconUrl =
+                        "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png";
+                    break;
+                case "Road & Traffic":
+                    iconUrl =
+                        "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png";
+                    break;
+                default:
+                    iconUrl =
+                        "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png";
+            }
+
+            return L.icon({
+                iconUrl: iconUrl,
+                shadowUrl:
+                    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41],
+            });
+        }
+
+        function addMarkerToMap(marker) {
+            const icon = getCategoryIcon(marker.category);
+            const leafletMarker = L.marker([marker.lat, marker.lng], {
+                icon,
+            }).addTo(map);
+
+            // Store votes directly on marker
+            leafletMarker.upVotes = marker.upVotes || 0;
+            leafletMarker.downVotes = marker.downVotes || 0;
+
+            window.markers[marker._id] = leafletMarker;
+
+            // 🟢 Instead of binding static HTML, bind a function that generates it fresh
+            leafletMarker.bindPopup(() => {
+                let popupContent = `
+    <style>
+      .vote-btn, .delete-btn {
+        border: none;
+        padding: 6px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        transition: background 0.2s, transform 0.1s;
+      }
+      .vote-btn.up {
+        background: #e6f7e6;
+        color: #28a745;
+      }
+      .vote-btn.up:hover {
+        background: #d4f5d4;
+        transform: scale(1.05);
+      }
+      .vote-btn.down {
+        background: #fdeaea;
+        color: #d9534f;
+      }
+      .vote-btn.down:hover {
+        background: #fbd4d4;
+        transform: scale(1.05);
+      }
+      .vote-btn:active, .delete-btn:active {
+        transform: scale(0.95);
+      }
+      .delete-btn {
+        background: #fff0f0;
+        color: #d9534f;
+      }
+      .delete-btn:hover {
+        background: #ffe0e0;
+        transform: scale(1.05);
+      }
+      .divider {
+        margin: 10px 0;
+        border-top: 1px solid #ddd;
+      }
+    </style>
+
+    <div style="font-family: Arial, sans-serif; max-width: 220px; line-height:1.4;">
+      <div style="font-size:16px; font-weight:600; margin-bottom:4px; color:#333;">
+        ${marker.tit}
+      </div>
+      <div style="font-size:14px; color:#555; margin-bottom:6px;">
+        ${marker.des}
+      </div>
+      <div style="font-size:12px; font-style:italic; color:#888; margin-bottom:10px;">
+        ${marker.category}
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:flex; gap:10px; align-items:center; justify-content:center; margin-top:8px;">
+        <button class="vote-btn up" onclick="vote('${marker._id}', 'up')">👍</button>
+        <span id="up-${marker._id}">${leafletMarker.upVotes}</span>
+        <button class="vote-btn down" onclick="vote('${marker._id}', 'down')">👎</button>
+        <span id="down-${marker._id}">${leafletMarker.downVotes}</span>
+      </div>
+    </div>
+  `;
+
+                if (currentUserId && marker.ownerId === currentUserId) {
+                    popupContent += `
+      <div style="text-align:center; margin-top:10px;">
+        <button class="delete-btn" onclick="deleteMarker('${marker._id}')">🗑 Delete</button>
+      </div>
+    `;
+                }
+
+                return popupContent;
+            });
+
+
+        }
+
+        function createInputPopup(lat, lng) {
+            const popupContent = document.createElement("div");
+            popupContent.className = "popup-form";
+
+            // --- Add styles ---
+            const style = document.createElement("style");
+            style.textContent = `
+                .popup-form {
+                    font-family: Arial, sans-serif;
+                    max-width: 240px;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                .popup-form input,
+                .popup-form textarea,
+                .popup-form select {
+                    width: 100%;
+                    padding: 6px 8px;
+                    border: 1px solid #ccc;
+                    border-radius: 6px;
+                    font-size: 14px;
+                    font-family: inherit;
+                    box-sizing: border-box;
+                    transition: border 0.2s, box-shadow 0.2s;
+                }
+                .popup-form input:focus,
+                .popup-form textarea:focus,
+                .popup-form select:focus {
+                    border-color: #0077ff;
+                    box-shadow: 0 0 4px rgba(0, 119, 255, 0.2);
+                    outline: none;
+                }
+                .popup-form textarea {
+                    resize: none;
+                    min-height: 60px;
+                }
+                .popup-buttons {
+                    display: flex;
+                    justify-content: flex-end;
+                    gap: 8px;
+                    margin-top: 6px;
+                }
+                .popup-buttons button {
+                    padding: 6px 12px;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 14px;
+                    font-weight: 500;
+                    cursor: pointer;
+                    transition: background 0.2s, transform 0.1s;
+                }
+                .popup-buttons button:hover {
+                    transform: scale(1.05);
+                }
+                .popup-buttons button:active {
+                    transform: scale(0.95);
+                }
+                .popup-buttons button:first-child {
+                    background: #0077ff;
+                    color: white;
+                }
+                .popup-buttons button:first-child:disabled {
+                    background: #b5d4ff;
+                    cursor: not-allowed;
+                }
+                .popup-buttons button:last-child {
+                    background: #f0f0f0;
+                    color: #333;
+                }
+                .popup-buttons button:last-child:hover {
+                    background: #e0e0e0;
+                }
+            `;
+            document.head.appendChild(style);
+
+            // --- Inputs ---
+            const titleInput = document.createElement("input");
+            titleInput.placeholder = "Title";
+
+            const descInput = document.createElement("textarea");
+            descInput.placeholder = "Description";
+
+            const categorySelect = document.createElement("select");
+            categorySelect.id = "category-select";
+
+            const option1 = new Option("🚶‍♀️ Walking & Biking", "Walking & Biking");
+            const option2 = new Option("🚌 Transit", "Transit");
+            const option3 = new Option("🚗 Road & Traffic", "Road & Traffic");
+
+            categorySelect.append(option1, option2, option3);
+
+            // --- Buttons ---
+            const saveBtn = document.createElement("button");
+            saveBtn.innerText = "Save";
+            saveBtn.disabled = true;
+
+            const cancelBtn = document.createElement("button");
+            cancelBtn.innerText = "Cancel";
+
+            const btnWrapper = document.createElement("div");
+            btnWrapper.className = "popup-buttons";
+            btnWrapper.appendChild(saveBtn);
+            btnWrapper.appendChild(cancelBtn);
+
+            popupContent.append(titleInput, descInput, categorySelect, btnWrapper);
+
+            const popup = L.popup()
+                .setLatLng([lat, lng])
+                .setContent(popupContent)
+                .openOn(map);
+
+            // --- Validation ---
+            function validateInputs() {
+                const hasTitle = titleInput.value.trim().length > 0;
+                const hasDesc = descInput.value.trim().length > 0;
+                saveBtn.disabled = !(hasTitle && hasDesc);
+            }
+
+            titleInput.addEventListener("input", validateInputs);
+            descInput.addEventListener("input", validateInputs);
+
+            // --- Actions ---
+            cancelBtn.onclick = () => map.closePopup();
+
+            saveBtn.onclick = () => {
+                const markerData = {
+                    tit: titleInput.value,
+                    des: descInput.value,
+                    lat,
+                    lng,
+                    category: categorySelect.value,
+                    status:"• New"
+                };
+
+                parent.postMessage({ type: "saveMarker", data: markerData }, "*");
+                map.closePopup();
+            };
+        }
+
+
+        function deleteMarker(id) {
+            parent.postMessage({ type: "deleteMarker", data: id }, "*");
+        }
+
+        map.on("click", (e) => {
+            const { lat, lng } = e.latlng;
+
+            if (!isLoggedIn) {
+                const loginPopupContent = `
+                    <div style="text-align:center; font-family: Arial, sans-serif; line-height:1.4;">
+                    <div style="font-size:16px; font-weight:500; color:#333; margin-bottom:12px;">
+                        Please log in to create markers.
+                    </div>
+                    <button style="
+                        padding: 8px 16px;
+                        border: none;
+                        border-radius: 8px;
+                        font-size: 14px;
+                        font-weight: 500;
+                        cursor: pointer;
+                        background: #0077ff;
+                        color: white;
+                        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                        transition: background 0.2s, transform 0.1s;
+                    "
+                    onmouseover="this.style.background='#005fcc'; this.style.transform='scale(1.05)';"
+                    onmouseout="this.style.background='#0077ff'; this.style.transform='scale(1)';"
+                    onmousedown="this.style.transform='scale(0.95)';"
+                    onmouseup="this.style.transform='scale(1)';"
+                    onclick="parent.postMessage({ type: 'requestLogin' }, '*')">
+                        Log In
+                    </button>
+                </div>
+                `;
+
+                L.popup()
+                    .setLatLng([lat, lng])
+                    .setContent(loginPopupContent)
+                    .openOn(map);
+                return;
+            }
+
+            createInputPopup(lat, lng);
+        });
+
+        function vote(markerId, direction) {
+            const marker = window.markers[markerId];
+            if (!marker) return;
+
+            // Check if user is logged in
+            if (!isLoggedIn) {
+                // Look for an existing message, remove it if present
+                const popupEl = marker.getPopup().getElement();
+                let existingMsg = popupEl.querySelector('.login-msg');
+                if (existingMsg) existingMsg.remove();
+
+                // Create the inline login reminder
+                const msgDiv = document.createElement('div');
+                msgDiv.className = 'login-msg';
+                msgDiv.style.marginTop = '8px';
+                msgDiv.style.fontSize = '13px';
+                msgDiv.style.color = '#555';
+                msgDiv.style.textAlign = 'center';
+                msgDiv.innerHTML = `Please <a href="#" onclick="parent.postMessage({ type: 'requestLogin' }, '*'); return false;">log in</a> to ${direction === 'up' ? 'upvote' : 'downvote'}.`;
+
+                // Append below the buttons
+                const buttonContainer = popupEl.querySelector('div[style*="justify-content:center"]');
+                if (buttonContainer) {
+                    buttonContainer.parentNode.appendChild(msgDiv);
+                }
+
+                return; // Do not proceed with voting
+            }
+
+            // Normal vote action
+            parent.postMessage(
+                {
+                    type: "voteMarker",
+                    data: { id: markerId, direction },
+                },
+                "*"
+            );
+        }
+
+
+        function handleVote(markerId, voteType) {
+            window.parent.postMessage(
+                {
+                    type: "vote",
+                    data: { markerId, voteType },
+                },
+                "*"
+            );
+        }
+
+        window.addEventListener("message", (event) => {
+            const { type, data } = event.data;
+
+            if (type === "focusLocation") {
+                const { lat, lng } = data;
+                map.setView([lat, lng], 17); // zoom in close
+            }
+
+            if (type === "userInfo") {
+                isLoggedIn = data.isLoggedIn;
+                currentUserId = data.userId;
+            }
+
+            if (type === "markersLoaded") {
+                data.forEach(addMarkerToMap);
+            }
+
+            if (type === "markerSaved") {
+                addMarkerToMap(data);
+            }
+
+            if (window.markers[data]) {
+                map.removeLayer(window.markers[data]);
+                delete window.markers[data];
+            }
+
+            if (type === "voteUpdated") {
+                const { markerId, upVotes, downVotes } = data;
+
+                // Update popup spans immediately
+                const upSpan = document.getElementById(`up-${markerId}`);
+                const downSpan = document.getElementById(`down-${markerId}`);
+
+                if (upSpan) upSpan.textContent = upVotes;
+                if (downSpan) downSpan.textContent = downVotes;
+
+                // ✅ Store updated values on the Leaflet marker object
+                const leafletMarker = window.markers[markerId];
+                if (leafletMarker) {
+                    leafletMarker.upVotes = upVotes;
+                    leafletMarker.downVotes = downVotes;
+                }
+            }
+        });
+
+        parent.postMessage({ type: "loadMarkers" }, "*");
+    </script>
+</body>
+
+</html>
