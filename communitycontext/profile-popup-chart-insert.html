@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic Census Data Comparison</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; padding: 10px; }
+        .chart-container { position: relative; height: 450px; width: 100%; }
+        #loading { text-align: center; margin-top: 50px; font-weight: bold; color: #555; }
+    </style>
+</head>
+<body>
+
+<div id="loading">Loading community data...</div>
+<div class="chart-container" id="chartDiv" style="display: none;">
+    <canvas id="censusChart"></canvas>
+</div>
+
+<script>
+    const year = "2022";
+    const dataset = "acs/acs5";
+    
+    // UPDATED: Added B19013_001E for Median Household Income
+    const variables = "B03002_001E,B03002_003E,B08301_001E,B08301_018E,B08301_019E,C17002_001E,C17002_002E,C17002_003E,B19013_001E";
+    const baseUrl = `https://api.census.gov/data/${year}/${dataset}?get=${variables}`;
+    
+    let myChart = null; 
+
+    window.onload = function() {
+        window.parent.postMessage("ready", "*");
+    };
+
+    window.onmessage = function(event) {
+        const geoid = event.data;
+        if (geoid && typeof geoid === 'string' && geoid.length === 12) {
+            const state = geoid.substring(0, 2);
+            const county = geoid.substring(2, 5);
+            const tract = geoid.substring(5, 11);
+            const bg = geoid.substring(11, 12);
+            
+            loadDataAndRenderChart(state, county, tract, bg);
+        }
+    };
+
+    function calcPct(part, total) {
+        if (!total || total === 0) return 0;
+        return ((part / total) * 100).toFixed(1);
+    }
+
+    async function getCensusData(url) {
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+            const row = data[1]; 
+
+            const popTotal = parseInt(row[0]);
+            const popWhiteNH = parseInt(row[1]);
+            const commuteTotal = parseInt(row[2]);
+            const commuteBike = parseInt(row[3]);
+            const commuteWalk = parseInt(row[4]);
+            
+            const povTotal = parseInt(row[5]);
+            const povUnder50 = parseInt(row[6]); 
+            const pov50to99 = parseInt(row[7]);  
+            const povBelow = povUnder50 + pov50to99;
+
+            // NEW: Fetching Income (Handle missing data which the Census sometimes returns as negative numbers)
+            const rawIncome = parseInt(row[8]);
+            const medianIncome = rawIncome > 0 ? rawIncome : 0; 
+
+            const minorityPct = calcPct((popTotal - popWhiteNH), popTotal);
+            const walkBikePct = calcPct((commuteBike + commuteWalk), commuteTotal);
+            const povertyPct = calcPct(povBelow, povTotal);
+
+            // Returning income as the 4th item in the array
+            return [minorityPct, walkBikePct, povertyPct, medianIncome];
+        } catch (error) {
+            console.error("Error fetching Census data:", error);
+            return [0, 0, 0, 0]; 
+        }
+    }
+
+    async function loadDataAndRenderChart(state, county, tract, bg) {
+        const bgUrl = `${baseUrl}&for=block%20group:${bg}&in=state:${state}%20county:${county}%20tract:${tract}`;
+        const countyUrl = `${baseUrl}&for=county:${county}&in=state:${state}`;
+        const stateUrl = `${baseUrl}&for=state:${state}`;
+        const usUrl = `${baseUrl}&for=us:*`;
+
+        const [bgData, countyData, stateData, usData] = await Promise.all([
+            getCensusData(bgUrl),
+            getCensusData(countyUrl),
+            getCensusData(stateUrl),
+            getCensusData(usUrl)
+        ]);
+
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('chartDiv').style.display = 'block';
+
+        renderChart(bgData, countyData, stateData, usData, tract, bg);
+    }
+
+    function renderChart(bgData, countyData, stateData, usData, tract, bg) {
+        const ctx = document.getElementById('censusChart').getContext('2d');
+        
+        if (myChart) {
+            myChart.destroy();
+        }
+
+        const formattedTract = parseInt(tract.substring(0, 4), 10) + '.' + tract.substring(4, 6);
+
+        myChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: [`Block Group ${bg} (Tract ${formattedTract})`, 'County', 'State', 'United States'],
+                datasets: [
+                    {
+                        label: '% Minority Population',
+                        data: [bgData[0], countyData[0], stateData[0], usData[0]],
+                        backgroundColor: 'rgba(54, 162, 235, 0.7)',
+                        borderWidth: 1,
+                        yAxisID: 'y' // Assigned to the left axis
+                    },
+                    {
+                        label: '% Walk/Bike to Work',
+                        data: [bgData[1], countyData[1], stateData[1], usData[1]],
+                        backgroundColor: 'rgba(75, 192, 192, 0.7)',
+                        borderWidth: 1,
+                        yAxisID: 'y' // Assigned to the left axis
+                    },
+                    {
+                        label: '% Below Poverty Level',
+                        data: [bgData[2], countyData[2], stateData[2], usData[2]],
+                        backgroundColor: 'rgba(255, 99, 132, 0.7)',
+                        borderWidth: 1,
+                        yAxisID: 'y' // Assigned to the left axis
+                    },
+                    {
+                        label: 'Median Household Income',
+                        data: [bgData[3], countyData[3], stateData[3], usData[3]],
+                        backgroundColor: 'rgba(153, 102, 255, 0.7)', // Purple color for contrast
+                        borderWidth: 1,
+                        yAxisID: 'y1' // Assigned to the NEW right axis
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Community Profile: Demographics, Transit, Poverty, and Income',
+                        font: { size: 16 }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                // Formatting check to show $ for income and % for the others
+                                if (context.dataset.yAxisID === 'y1') {
+                                    return context.dataset.label + ': $' + context.parsed.y.toLocaleString();
+                                } else {
+                                    return context.dataset.label + ': ' + context.parsed.y + '%';
+                                }
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
+                        beginAtZero: true,
+                        max: 100,
+                        title: {
+                            display: true,
+                            text: 'Percentage (%)'
+                        }
+                    },
+                    y1: {
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        beginAtZero: true,
+                        // This hides the grid lines for the second axis so they don't overlap the first
+                        grid: {
+                            drawOnChartArea: false,
+                        },
+                        title: {
+                            display: true,
+                            text: 'Income ($)'
+                        }
+                    }
+                }
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
