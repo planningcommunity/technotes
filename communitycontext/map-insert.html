@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Monongalia County Block Groups – ACS Layers</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+    <style>
+        html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+        #map {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+        .legend {
+            background: white;
+            padding: 6px 10px;
+            font: 12px/14px Arial, sans-serif;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.2);
+            border-radius: 5px;
+        }
+
+        .legend h4 {
+            margin: 0 0 4px;
+            font-size: 14px;
+        }
+
+        .legend i {
+            width: 18px;
+            height: 18px;
+            float: left;
+            margin-right: 6px;
+            opacity: 0.7;
+        }
+
+        .legend .row {
+            clear: both;
+            padding-top: 2px;
+        }
+
+        table {
+            border-collapse: collapse;
+        }
+
+        td {
+            padding: 2px 4px;
+        }
+
+        .popup-header {
+            font-weight: bold;
+            margin-bottom: 4px;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 2px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+    <script>
+        const map = L.map("map").setView([39.63, -79.95], 13);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors"
+        }).addTo(map);
+
+        let activeOverlay = null;
+        let highlightedLayer = null; // currently clicked layer
+
+        function formatName(fullName) {
+            const parts = fullName.split(",");
+            return parts.slice(0, 2).join(",");
+        }
+
+        function getQuartiles(arr) {
+            const sorted = arr.filter(v => !isNaN(v)).sort((a, b) => a - b);
+            if (!sorted.length) return [0, 0, 0];
+            const q = (p) => {
+                const pos = (sorted.length - 1) * p, base = Math.floor(pos), rest = pos - base;
+                return sorted[base + 1] !== undefined ? sorted[base] + rest * (sorted[base + 1] - sorted[base]) : sorted[base];
+            };
+            return [q(0.25), q(0.5), q(0.75)];
+        }
+
+        function getQuartileBreaks(values) {
+            const sorted = values.filter(v => !isNaN(v)).sort((a, b) => a - b);
+            if (!sorted.length) return [0, 0, 0, 0];
+            const min = sorted[0];
+            const [q1, q2, q3] = getQuartiles(values);
+            return [min, q1, q2, q3];
+        }
+
+        function getQuartileColorFunc(values, colors) {
+            const [q1, q2, q3] = getQuartiles(values);
+            return (v) => {
+                if (isNaN(v)) return "#ccc";
+                if (v <= q1) return colors[0];
+                if (v <= q2) return colors[1];
+                if (v <= q3) return colors[2];
+                return colors[3];
+            };
+        }
+
+        function createLegend(grades, colors, title, { prefix = "", suffix = "" } = {}) {
+            const div = L.DomUtil.create("div", "legend");
+            const fmt = v => Math.round(v).toLocaleString();
+            div.innerHTML = `<h4>${title}</h4>`;
+            for (let i = 0; i < colors.length; i++) {
+                const start = grades[i], end = grades[i + 1];
+                const label = end !== undefined ? `${prefix}${fmt(start)}–${fmt(end)}${suffix}` : `${prefix}${fmt(start)}+${suffix}`;
+                const row = document.createElement("div");
+                row.className = "row";
+                row.innerHTML = `<i style="background:${colors[i]}"></i> ${label}`;
+                div.appendChild(row);
+            }
+            return div;
+        }
+
+        async function fetchACSData() {
+            // UPDATED: Changed year to 2022 and swapped B02001 race tables for B03002 Hispanic/Latino origin tables
+            const url = "https://api.census.gov/data/2022/acs/acs5?" +
+                "get=B19013_001E," +
+                "B03002_001E,B03002_003E," +
+                "B08301_018E,B08301_019E,B08301_001E," +
+                "NAME&for=block%20group:*&in=state:54&in=county:061";
+
+            const res = await fetch(url);
+            const json = await res.json();
+            const [headers, ...rows] = json;
+            const lookup = {};
+            
+            rows.forEach(row => {
+                const rec = Object.fromEntries(headers.map((h, i) => [h, row[i]]));
+                const geoid = rec.state + rec.county + rec.tract + rec["block group"];
+                
+                const income = +rec.B19013_001E;
+                // UPDATED: Using B03002 variables to match the Lightbox perfectly
+                const totalPop = +rec.B03002_001E; 
+                const whiteNonHispanic = +rec.B03002_003E; 
+                
+                // Calculate minority using the same math as the Lightbox
+                const minorityPct = totalPop > 0 ? ((totalPop - whiteNonHispanic) / totalPop * 100) : null;
+                
+                const walk = +rec.B08301_018E;
+                const bike = +rec.B08301_019E;
+                const commuters = +rec.B08301_001E;
+                const walkBikePct = commuters > 0 ? ((walk + bike) / commuters * 100) : null;
+
+                lookup[geoid] = {
+                    name: rec.NAME,
+                    income: income > 0 ? income : null,
+                    population: totalPop,
+                    minorityPct,
+                    walkBikePct
+                };
+            });
+            return lookup;
+        }
+
+        // NEW FUNCTION: Sends the geoid to the Wix parent page
+        function sendToWix(geoid) {
+            window.parent.postMessage({ type: 'openCensusPopup', geoid: geoid }, '*');
+        }
+
+        // UPDATED: Added 'geoid' to parameters and appended the button to the HTML
+        function buildPopupHTML(acs, overlayKey, geoid) {
+            const fields = [
+                { label: "Population", key: "population", fmt: v => v.toLocaleString() },
+                { label: "Population Density", key: "density", fmt: v => Math.round(v) + " /sq mi" },
+                { label: "Median Income", key: "income", fmt: v => v ? `$${v.toLocaleString()}` : "NA" },
+                { label: "Minority Population", key: "minorityPct", fmt: v => v?.toFixed(1) + "%" },
+                { label: "Walk/Bike to Work", key: "walkBikePct", fmt: v => v?.toFixed(1) + "%" }
+            ];
+
+            let html = `<div class="popup-header">${formatName(acs.name)}</div><table>`;
+            fields.forEach(f => {
+                const val = f.key === "density" ? acs.density : acs[f.key];
+                const normalizedOverlayKey = overlayKey === "% Minority (Non-White)" ? "Minority Population" :
+                                             overlayKey === "% Walk/Bike to Work" ? "Walk/Bike to Work" :
+                                             overlayKey;
+                const bold = f.label === normalizedOverlayKey ? "font-weight:bold;" : "";
+                html += `<tr><td style="${bold}">${f.label}:</td><td style="${bold}">${f.fmt(val)}</td></tr>`;
+            });
+            html += "</table>";
+            
+            // NEW: The button that triggers sendToWix
+            html += `<button onclick="sendToWix('${geoid}')" style="margin-top: 10px; width: 100%; padding: 6px; cursor: pointer; background: #0078d7; color: white; border: none; border-radius: 4px; font-weight: bold;">View Profile</button>`;
+            
+            return html;
+        }
+
+        async function renderMap() {
+            const acsData = await fetchACSData();
+            const geoRes = await fetch("https://raw.githubusercontent.com/planningcommunity/censusGeoJson/refs/heads/main/MonCountyBG.geojson");
+            const geojson = await geoRes.json();
+
+            geojson.features.forEach(f => {
+                const geoid = f.properties.GEOID;
+                const pop = acsData[geoid]?.population || 0;
+                const areaSqMiles = turf.area(f) / 2.59e6;
+                f.properties.density = areaSqMiles > 0 ? pop / areaSqMiles : 0;
+            });
+
+            const incomes = Object.values(acsData).map(d => d.income);
+            const pops = Object.values(acsData).map(d => d.population);
+            const densities = geojson.features.map(f => f.properties.density);
+            const minorities = Object.values(acsData).map(d => d.minorityPct);
+            const walkbikes = Object.values(acsData).map(d => d.walkBikePct);
+
+            const incomeColors = ["#fee5d9", "#fcae91", "#fb6a4a", "#cb181d"];
+            const popColors = ["#deebf7", "#9ecae1", "#4292c6", "#08519c"];
+            const densityColors = ["#edf8e9", "#bae4b3", "#74c476", "#238b45"];
+            const minorityColors = ["#f7f4f9", "#d0d1e6", "#74a9cf", "#0570b0"];
+            const walkBikeColors = ["#ffffcc", "#c2e699", "#78c679", "#238443"];
+
+            const incomeColor = getQuartileColorFunc(incomes, incomeColors);
+            const popColor = getQuartileColorFunc(pops, popColors);
+            const densityColor = getQuartileColorFunc(densities, densityColors);
+            const minorityColor = getQuartileColorFunc(minorities, minorityColors);
+            const walkBikeColor = getQuartileColorFunc(walkbikes, walkBikeColors);
+
+            const incomeBreaks = getQuartileBreaks(incomes);
+            const popBreaks = getQuartileBreaks(pops);
+            const densityBreaks = getQuartileBreaks(densities);
+            const minorityBreaks = getQuartileBreaks(minorities);
+            const walkBikeBreaks = getQuartileBreaks(walkbikes);
+
+            const makeLayer = (colorFunc, valAccessor, overlayName) => L.geoJSON(geojson, {
+    style: f => ({
+        color: "#333",
+        weight: 1,
+        fillColor: colorFunc(valAccessor(acsData[f.properties.GEOID], f)),
+        fillOpacity: 0.6
+    }),
+    onEachFeature: (f, layer) => {
+        const acs = acsData[f.properties.GEOID];
+        if (!acs) return;
+        acs.density = f.properties.density;
+        
+        // UPDATED: Passed f.properties.GEOID into the function
+        layer.bindPopup(() => buildPopupHTML(acs, activeOverlay || overlayName, f.properties.GEOID));
+
+        layer.on("popupopen", () => {
+            if (highlightedLayer && highlightedLayer !== layer) {
+                const prevACS = acsData[highlightedLayer.feature.properties.GEOID];
+                const prevLayerFunc = highlightedLayer.options.fillColor ? highlightedLayer.options.fillColor : colorFunc;
+                highlightedLayer.setStyle({
+                    color: "#333",
+                    weight: 1,
+                    fillColor: colorFunc(prevACS ? valAccessor(prevACS, highlightedLayer.feature) : null),
+                    fillOpacity: 0.6
+                });
+            }
+            highlightedLayer = layer;
+            layer.setStyle({
+                color: "#ff9900",
+                weight: 3,
+                fillColor: "#ffff66",
+                fillOpacity: 0.5
+            });
+        });
+
+        layer.on("popupclose", () => {
+            layer.setStyle({
+                color: "#333",
+                weight: 1,
+                fillColor: colorFunc(acs ? valAccessor(acs, f) : null),
+                fillOpacity: 0.6
+            });
+            highlightedLayer = null;
+        });
+    }
+});
+
+            const incomeLayer = makeLayer(incomeColor, d => d?.income, "Median Income");
+            const popLayer = makeLayer(popColor, d => d?.population, "Population");
+            const densityLayer = makeLayer(densityColor, (d, f) => f.properties.density, "Population Density");
+            const minorityLayer = makeLayer(minorityColor, d => d?.minorityPct, "% Minority (Non-White)");
+            const walkBikeLayer = makeLayer(walkBikeColor, d => d?.walkBikePct, "% Walk/Bike to Work");
+
+            const incomeLegend = L.control({ position: "topright" }); incomeLegend.onAdd = () => createLegend(incomeBreaks, incomeColors, "Median Income", { prefix: "$" });
+            const populationLegend = L.control({ position: "topright" }); populationLegend.onAdd = () => createLegend(popBreaks, popColors, "Population");
+            const densityLegend = L.control({ position: "topright" }); densityLegend.onAdd = () => createLegend(densityBreaks, densityColors, "Pop. Density", { suffix: "/sq mi" });
+            const minorityLegend = L.control({ position: "topright" }); minorityLegend.onAdd = () => createLegend(minorityBreaks, minorityColors, "% Minority (Non-White)", { suffix: "%" });
+            const walkBikeLegend = L.control({ position: "topright" }); walkBikeLegend.onAdd = () => createLegend(walkBikeBreaks, walkBikeColors, "% Walk/Bike to Work", { suffix: "%" });
+
+            const overlays = {
+                "Population": popLayer,
+                "Population Density": densityLayer,
+                "Median Income": incomeLayer,
+                "% Minority (Non-White)": minorityLayer,
+                "% Walk/Bike to Work": walkBikeLayer
+            };
+
+            L.control.layers({}, overlays, { collapsed: false }).addTo(map);
+
+            map.on("overlayadd", e => {
+                activeOverlay = e.name;
+                if (e.layer === incomeLayer) incomeLegend.addTo(map);
+                if (e.layer === popLayer) populationLegend.addTo(map);
+                if (e.layer === densityLayer) densityLegend.addTo(map);
+                if (e.layer === minorityLayer) minorityLegend.addTo(map);
+                if (e.layer === walkBikeLayer) walkBikeLegend.addTo(map);
+            });
+
+            map.on("overlayremove", e => {
+                if (activeOverlay === e.name) activeOverlay = null;
+                if (e.layer === incomeLayer) map.removeControl(incomeLegend);
+                if (e.layer === popLayer) map.removeControl(populationLegend);
+                if (e.layer === densityLayer) map.removeControl(densityLegend);
+                if (e.layer === minorityLayer) map.removeControl(minorityLegend);
+                if (e.layer === walkBikeLayer) map.removeControl(walkBikeLegend);
+            });
+        }
+
+        renderMap().catch(err => console.error("Map loading error:", err));
+    </script>
+</body>
+
+</html>
