@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    
+    /* Wrapper ensures the canvas respects height/width */
+    .chart-wrapper { 
+        position: relative; 
+        width: 100%;
+        margin-bottom: 50px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="chart-wrapper" style="height: 500px;">
+    <canvas id="pieChart"></canvas>
+  </div>
+<br><br>
+  <hr>
+<br><br>
+  <div id="chart1_container" class="chart-wrapper">
+    <canvas id="barChart1"></canvas>
+  </div>
+  <br><br>
+  <hr>
+<br><br>
+  <div id="chart3_container" class="chart-wrapper">
+    <canvas id="barChart3"></canvas>
+  </div>
+
+  <script>
+    // Global variables to hold chart instances
+    let pieChartInstance = null;
+    let barChart1Instance = null;
+    let barChart3Instance = null;
+
+    // Helper: Currency Formatter
+    const formatCurrency = (num) => new Intl.NumberFormat('en-US', {
+        style: 'currency', currency: 'USD', maximumFractionDigits: 0
+    }).format(num);
+
+    // --- NEW HELPER: WRAP LONG LABELS ---
+    // This splits long text into multiple lines so it fits
+    function formatLabels(labels) {
+        const maxLen = 25; // Max characters per line before breaking
+        return labels.map(label => {
+            if (label.length > maxLen) {
+                const words = label.split(' ');
+                let lines = [];
+                let currentLine = words[0];
+
+                for (let i = 1; i < words.length; i++) {
+                    if (currentLine.length + words[i].length < maxLen) {
+                        currentLine += ' ' + words[i];
+                    } else {
+                        lines.push(currentLine);
+                        currentLine = words[i];
+                    }
+                }
+                lines.push(currentLine);
+                return lines;
+            } else {
+                return label;
+            }
+        });
+    }
+
+    window.onmessage = (event) => {
+      if (event.data) {
+        const analyticsData = event.data.chartData;
+        const dynamicHeight = event.data.barChartHeight;
+
+        if (dynamicHeight) {
+            document.getElementById('chart1_container').style.height = dynamicHeight + 'px';
+            document.getElementById('chart3_container').style.height = dynamicHeight + 'px';
+        }
+
+        drawPieChart(analyticsData);
+        drawAvgAllocationChart(analyticsData);
+        drawAvgPercentChart(analyticsData);
+      }
+    };
+
+    // --- CHART 1: PIE CHART ---
+    function drawPieChart(data) {
+        const ctx = document.getElementById('pieChart').getContext('2d');
+        
+        const rawLabels = data.map(p => p.title);
+        const values = data.map(p => p.percentOfGrandTotal);
+
+        // 1. APPLY THE WRAPPER FIX
+        const wrappedLabels = formatLabels(rawLabels);
+
+        if (pieChartInstance) pieChartInstance.destroy(); 
+
+        pieChartInstance = new Chart(ctx, {
+            type: 'doughnut', 
+            data: {
+                labels: wrappedLabels, 
+                datasets: [{
+                    data: values,
+                    backgroundColor: [ 
+                        '#3366CC', '#DC3912', '#FF9900', '#109618', '#990099', '#0099C6', '#DD4477', '#66AA00'
+                    ]
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                layout: {
+                    padding: { bottom: 20 } 
+                },
+                plugins: {
+                    title: { 
+                        display: true, 
+                        text: 'Total Funding Distribution', 
+                        font: { size: 18, weight: 'bold' },
+                        padding: { bottom: 20 }
+                    },
+                    legend: {
+                        position: 'bottom', 
+                        // --- CHANGE IS HERE ---
+                        align: 'start',    // 'start' = Left Aligned, 'center' = Centered, 'end' = Right Aligned
+                        // ----------------------
+                        labels: {
+                               
+                            padding: 24,    // Increased padding slightly for cleaner look
+                            font: { size: 12 },
+                            textAlign: 'left' // Ensures multi-line text aligns left relative to its box
+                        }
+                    },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.label || '';
+                                if (Array.isArray(label)) {
+                                    label = label.join(' '); 
+                                }
+                                const val = context.raw;
+                                return `${label}: ${val}%`;
+                            }
+                        }
+                    }
+                },
+                cutout: '40%' 
+            }
+        });
+    }
+
+    // --- CHART 2: AVG ALLOCATION (Horizontal Bar) ---
+    function drawAvgAllocationChart(data) {
+        const ctx = document.getElementById('barChart1').getContext('2d');
+        
+        const rawLabels = data.map(p => p.title);
+        const values = data.map(p => p.avgAllocation);
+
+        // APPLY THE WRAPPER FIX HERE
+        const wrappedLabels = formatLabels(rawLabels);
+
+        if (barChart1Instance) barChart1Instance.destroy();
+
+        barChart1Instance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: wrappedLabels, // Use wrapped labels
+                datasets: [{
+                    label: 'Average Allocation', 
+                    data: values,
+                    backgroundColor: '#3366CC',
+                    barPercentage: 0.6 
+                }]
+            },
+            options: {
+                indexAxis: 'y', 
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: { display: true, text: 'Average Amount Received per Project', font: { size: 16 } },
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const item = data[context.dataIndex]; 
+                                const formattedAvg = formatCurrency(item.avgAllocation);
+                                const formattedTarget = formatCurrency(item.targetBudget);
+                                return `Average Allocation: ${formattedAvg} of ${formattedTarget} Target`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { 
+                        title: { display: true, text: 'Average Allocation ($)' },
+                        beginAtZero: true 
+                    },
+                    y: {
+                        ticks: { autoSkip: false } 
+                    }
+                }
+            }
+        });
+    }
+
+    // --- CHART 3: AVG PERCENT FUNDED (Horizontal Bar) ---
+    function drawAvgPercentChart(data) {
+        const ctx = document.getElementById('barChart3').getContext('2d');
+
+        const rawLabels = data.map(p => p.title);
+        const values = data.map(p => p.avgPercentFunded);
+
+        // APPLY THE WRAPPER FIX HERE TOO
+        const wrappedLabels = formatLabels(rawLabels);
+
+        if (barChart3Instance) barChart3Instance.destroy();
+
+        barChart3Instance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: wrappedLabels, // Use wrapped labels
+                datasets: [{
+                    data: values,
+                    backgroundColor: '#DC3912',
+                    barPercentage: 0.6
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: { display: true, text: 'Average Percentage of Funding Goal Achieved', font: { size: 16 } },
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                const val = Math.round(context.raw);
+                                return `${val}% Funded`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { 
+                        title: { display: true, text: 'Percentage (%)' },
+                        beginAtZero: true 
+                    },
+                    y: { ticks: { autoSkip: false } }
+                }
+            }
+        });
+    }
+  </script>
+</body>
+</html>
